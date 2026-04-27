@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>3D Model Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a1a; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255,255,255,0.4);
+      font: 12px monospace;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">drag to rotate · scroll to zoom · shift+drag to pan</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+
+  /* ============================================================
+     CHANGE THIS to your model file path and format
+     Supported formats: 'stl'  'obj'  'ply'
+     ============================================================ */
+  const MODEL_PATH   = 'pindwg.stl';   // <-- your file path here
+  const MODEL_FORMAT = 'stl';         // <-- 'stl', 'obj', or 'ply'
+  /* ============================================================ */
+
+  const canvas = document.getElementById('c');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(devicePixelRatio);
+  renderer.setSize(innerWidth, innerHeight);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1a1a1a);
+
+  const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.001, 100000);
+  camera.position.set(0, 0, 5);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+  sun.position.set(5, 10, 7);
+  scene.add(sun);
+  scene.add(new THREE.DirectionalLight(0x8888ff, 0.3)).position.set(-5, -3, -5);
+
+  window.addEventListener('resize', () => {
+    renderer.setSize(innerWidth, innerHeight);
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+  });
+
+  /* ---------- orbit: rotate the mesh, camera stays fixed looking at origin ---------- */
+  let drag = false, prevX = 0, prevY = 0;
+  let radius = 5;
+  let meshGroup = new THREE.Group();
+  scene.add(meshGroup);
+
+  // rotX/rotY accumulate mesh rotation
+  let rotX = 0, rotY = 0;
+
+  // camera sits on Z axis, always looks at origin
+  function updateCam() {
+    camera.position.set(0, 0, radius);
+    camera.lookAt(0, 0, 0);
+  }
+  updateCam();
+
+  canvas.addEventListener('mousedown', e => { drag = true; prevX = e.clientX; prevY = e.clientY; });
+  window.addEventListener('mouseup',   () => drag = false);
+  window.addEventListener('mousemove', e => {
+    if (!drag) return;
+    const dx = e.clientX - prevX, dy = e.clientY - prevY;
+    prevX = e.clientX; prevY = e.clientY;
+    if (e.shiftKey) {
+      // pan: move the group in screen space
+      const speed = radius * 0.001;
+      meshGroup.position.x += dx * speed;
+      meshGroup.position.y -= dy * speed;
+    } else {
+      // rotate mesh: left/right = Y axis, up/down = X axis (fixed, no inversion)
+      rotY += dx * 0.008;
+      rotX += dy * 0.008;   // drag down → tilt model down
+      meshGroup.rotation.set(rotX, rotY, 0);
+    }
+  });
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    radius = Math.max(0.001, radius * (1 + e.deltaY * 0.001));
+    updateCam();
+  }, { passive: false });
+
+  /* ---------- loaders ---------- */
+  function fitModel(geo) {
+    geo.computeBoundingBox();
+    geo.computeVertexNormals();
+    const box = geo.boundingBox;
+    const center = new THREE.Vector3(); box.getCenter(center);
+    const size   = new THREE.Vector3(); box.getSize(size);
+    geo.translate(-center.x, -center.y, -center.z);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    radius = maxDim * 2.2;
+    updateCam();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x88aacc, roughness: 0.5, metalness: 0.2 }));
+    meshGroup.add(mesh);
+  }
+
+  function loadSTL(url) {
+    fetch(url).then(r => r.arrayBuffer()).then(buf => {
+      const view = new DataView(buf);
+      /* detect ascii */
+      const head = new Uint8Array(buf, 0, 5);
+      const isAscii = String.fromCharCode(...head) === 'solid';
+      const geo = new THREE.BufferGeometry();
+      const pos = [], nor = [];
+      if (isAscii) {
+        const txt = new TextDecoder().decode(buf);
+        let nx=0,ny=0,nz=0;
+        for (const line of txt.split('\n')) {
+          const p = line.trim().split(/\s+/);
+          if (p[0]==='facet'&&p[1]==='normal') { nx=+p[2]; ny=+p[3]; nz=+p[4]; }
+          else if (p[0]==='vertex') { pos.push(+p[1],+p[2],+p[3]); nor.push(nx,ny,nz); }
+        }
+      } else {
+        const n = view.getUint32(80, true);
+        let off = 84;
+        for (let i=0; i<n; i++) {
+          const nx=view.getFloat32(off,true),ny=view.getFloat32(off+4,true),nz=view.getFloat32(off+8,true);
+          off+=12;
+          for (let v=0;v<3;v++) { pos.push(view.getFloat32(off,true),view.getFloat32(off+4,true),view.getFloat32(off+8,true)); nor.push(nx,ny,nz); off+=12; }
+          off+=2;
+        }
+      }
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+      geo.setAttribute('normal',   new THREE.Float32BufferAttribute(nor,3));
+      fitModel(geo);
+    }).catch(e => alert('Could not load STL: ' + e.message));
+  }
+
+  function loadOBJ(url) {
+    fetch(url).then(r => r.text()).then(txt => {
+      const verts=[], pos=[];
+      for (const line of txt.split('\n')) {
+        const p = line.trim().split(/\s+/);
+        if (p[0]==='v') verts.push([+p[1],+p[2],+p[3]]);
+        else if (p[0]==='f') {
+          const idx = p.slice(1).map(s=>parseInt(s)-1);
+          for (let i=1;i<idx.length-1;i++) { pos.push(...verts[idx[0]],...verts[idx[i]],...verts[idx[i+1]]); }
+        }
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+      fitModel(geo);
+    }).catch(e => alert('Could not load OBJ: ' + e.message));
+  }
+
+  function loadPLY(url) {
+    fetch(url).then(r => r.arrayBuffer()).then(buf => {
+      const txt = new TextDecoder().decode(buf);
+      const hEnd = txt.indexOf('end_header') + 'end_header\n'.length;
+      const header = txt.slice(0, hEnd);
+      const vc = parseInt((header.match(/element vertex (\d+)/)||[])[1]||0);
+      const fc = parseInt((header.match(/element face (\d+)/)||[])[1]||0);
+      const lines = txt.slice(hEnd).split('\n');
+      const verts = [];
+      for (let i=0;i<vc;i++) { const p=lines[i].trim().split(/\s+/); verts.push([+p[0],+p[1],+p[2]]); }
+      const pos = [];
+      for (let i=vc;i<vc+fc;i++) {
+        const p=lines[i].trim().split(/\s+/);
+        const n=+p[0], idx=p.slice(1,n+1).map(Number);
+        for (let j=1;j<idx.length-1;j++) pos.push(...verts[idx[0]],...verts[idx[j]],...verts[idx[j+1]]);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+      fitModel(geo);
+    }).catch(e => alert('Could not load PLY: ' + e.message));
+  }
+
+  /* ---------- load ---------- */
+  const fmt = MODEL_FORMAT.toLowerCase();
+  if      (fmt === 'stl') loadSTL(MODEL_PATH);
+  else if (fmt === 'obj') loadOBJ(MODEL_PATH);
+  else if (fmt === 'ply') loadPLY(MODEL_PATH);
+  else alert('Unknown format: ' + MODEL_FORMAT);
+
+  /* ---------- render loop ---------- */
+  (function loop() { requestAnimationFrame(loop); renderer.render(scene, camera); })();
+
+</script>
+</body>
+</html>
